@@ -3,10 +3,19 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "workspaces": [
+    "packages/*",
+    "common/*"
+  ],
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "abitype": "^1.0.8",
+    "viem": "^2.28.0",
+    "zod": "^3.24.3"
   }
 }
