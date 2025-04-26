@@ -46,6 +46,7 @@ async function decryptData(key: CryptoKey, iv: Uint8Array, encryptedData: ArrayB
 export function useWebAuthnEth() {
   const [account, setAccount] = useState<string | null>(null);
   const [hasExistingCredential, setHasExistingCredential] = useState<boolean | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [loggedInCredentialInfo, setLoggedInCredentialInfo] = useState<any>(null);
   const [ethAddress, setEthAddress] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -81,7 +82,7 @@ export function useWebAuthnEth() {
     setIsLoading(true);
     try {
       console.log("Attempting to create WebAuthn credential...");
-      const webAuthn = await WebAuthnP256.createCredential({ name: 'Joe' });
+      const webAuthn = await WebAuthnP256.createCredential({ name: 'Superdapp' });
       console.log("WebAuthn Credential created:", webAuthn);
       const webAuthnCredId = webAuthn.id;
 
@@ -180,6 +181,15 @@ export function useWebAuthnEth() {
     }
   }, []); // No dependencies needed
 
+  const logout = useCallback(() => {
+    setAccount(null);
+    setLoggedInCredentialInfo(null);
+    setEthAddress(null);
+    setLoginError(null);
+    // Keep isLoading false, no async operation here
+    console.log("User logged out.");
+  }, []);
+
   // Return state and actions
   return {
     account,
@@ -190,5 +200,6 @@ export function useWebAuthnEth() {
     isLoading, // Return loading state
     createAccountAndEthKey,
     loginAndAccessEthKey,
+    logout,
   };
 } 

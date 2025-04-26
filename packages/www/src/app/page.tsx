@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { useWebAuthnEth } from '@/hooks/useWebAuthnEth';
+import { useWebAuthnEth } from '@/hooks/use-web-authn-eth';
 import { createPublicClient, http, isAddress, createWalletClient, parseEther, hexToBytes, bytesToHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { holesky } from 'viem/chains';
@@ -27,8 +27,10 @@ export default function Home() {
     loggedInCredentialInfo,
     ethAddress,
     loginError,
+    isLoading,
     createAccountAndEthKey,
-    loginAndAccessEthKey
+    loginAndAccessEthKey,
+    logout
   } = useWebAuthnEth();
 
   const [balance, setBalance] = useState<string | null>(null);
@@ -54,7 +56,7 @@ export default function Home() {
       });
 
       const balanceEth = Number(balanceWei) / 10**18;
-      setBalance(balanceEth.toFixed(6));
+      setBalance(balanceEth.toFixed(8));
     } catch (error) {
       console.error("Error fetching balance:", error);
     }
@@ -143,107 +145,131 @@ export default function Home() {
     <div className="flex flex-col items-center justify-center w-full min-h-screen p-4 md:p-8">
       <main className="w-full max-w-4xl flex flex-col items-center gap-4">
         <h1 className="text-2xl font-bold mb-6">WebAuthn + Eth Key Demo</h1>
-        {hasExistingCredential === null && <p>Checking passkey support...</p>}
-        {hasExistingCredential === true && !loggedInCredentialInfo && (
-          <Button onClick={loginAndAccessEthKey} className="w-full max-w-md">
-            Login & Access Eth Key
-          </Button>
+
+        {/* Loading State */} 
+        {isLoading && <p>Processing...</p>}
+
+        {/* Initial Check State */} 
+        {hasExistingCredential === null && !isLoading && <p>Checking passkey support...</p>}
+
+        {/* WebAuthn Not Supported State */} 
+        {hasExistingCredential === false && !isLoading && (
+            <p className="text-sm text-red-500 mt-2 w-full max-w-md text-center">No platform authenticator detected or supported. You may need to use a different device/browser or security key.</p>
         )}
-        {hasExistingCredential === false && !account && (
-          <Button onClick={createAccountAndEthKey} className="w-full max-w-md">
-            Create WebAuthn Acc & Eth Key
-          </Button>
-        )}
-        {account && (
-          <div className="mt-2 p-4 border rounded bg-green-100 text-green-800 text-sm w-full max-w-md">
-            <p className="font-bold">{account}</p>
+
+        {/* WebAuthn Supported, Not Logged In State */} 
+        {hasExistingCredential === true && !loggedInCredentialInfo && !isLoading && (
+          <div className="flex flex-col gap-3 w-full max-w-md">
+            <Button onClick={loginAndAccessEthKey} className="w-full">
+              Login with Passkey
+            </Button>
+            <Button onClick={createAccountAndEthKey} variant="secondary" className="w-full">
+              Create New Passkey Account
+            </Button>
           </div>
         )}
+
+        {/* Logged In State */} 
         {loggedInCredentialInfo && (
-          <div className="mt-2 p-4 border rounded bg-blue-100 text-blue-800 text-sm break-all w-full max-w-md">
-            <p className="font-bold">WebAuthn Credential:</p>
-            <p>ID: {loggedInCredentialInfo.id}</p>
-            <p>Type: {loggedInCredentialInfo.type}</p>
-          </div>
-        )}
-        {ethAddress && (
-          <div className="mt-2 p-4 border rounded bg-purple-100 text-purple-800 text-sm break-all w-full max-w-md">
-            <p className="font-bold">Associated Ethereum Address:</p>
-            <p>{ethAddress}</p>
-            {balance !== null && (
-              <p className="mt-1 font-semibold">Balance: {balance} ETH</p>
+          <div className="w-full max-w-md space-y-4">
+            {account && (
+              <div className="mt-2 p-4 border rounded bg-green-100 text-green-800 text-sm">
+                <p className="font-bold">{account}</p>
+              </div>
             )}
-            {balance === null && ethAddress && (
-              <p className="mt-1 text-xs">Loading balance...</p>
-            )}
-            <div className="mt-4 flex justify-center">
-              <Cuer arena="/doghat.png" value={ethAddress} />
+            <div className="mt-2 p-4 border rounded bg-blue-100 text-blue-800 text-sm break-all">
+              <p className="font-bold">WebAuthn Credential:</p>
+              <p>ID: {loggedInCredentialInfo.id}</p>
+              <p>Type: {loggedInCredentialInfo.type}</p>
             </div>
-            <div className="mt-6 border-t pt-4 space-y-3">
-              <h3 className="text-lg font-semibold mb-2">Send ETH</h3>
-              <div>
-                <Label htmlFor="destinationAddress" className="block text-sm font-medium mb-1">To Address</Label>
-                <Input
-                  id="destinationAddress"
-                  type="text"
-                  placeholder="0x..."
-                  value={destinationAddress}
-                  onChange={(e) => setDestinationAddress(e.target.value)}
-                  className={`w-full ${isValidAddress === false ? 'border-red-500' : ''} ${isValidAddress === true ? 'border-green-500' : ''}`}
-                  disabled={isSending}
-                />
-                {isValidAddress === false && destinationAddress !== '' && (
-                  <p className="text-xs text-red-600 mt-1">Invalid Ethereum address</p>
+
+            {ethAddress && (
+              <div className="mt-2 p-4 border rounded bg-purple-100 text-purple-800 text-sm break-all">
+                <p className="font-bold">Associated Ethereum Address:</p>
+                <p>{ethAddress}</p>
+                {balance !== null && (
+                  <p className="mt-1 font-semibold">Balance: {balance} ETH</p>
                 )}
-              </div>
-              <div>
-                <Label htmlFor="sendAmount" className="block text-sm font-medium mb-1">Amount (ETH)</Label>
-                <Input
-                  id="sendAmount"
-                  type="number"
-                  step="0.0001"
-                  min="0"
-                  placeholder="0.001"
-                  value={sendAmount}
-                  onChange={(e) => setSendAmount(e.target.value)}
-                  className="w-full"
-                  disabled={isSending}
-                />
-              </div>
-              <Button
-                onClick={handleSend}
-                disabled={!isValidAddress || !destinationAddress || isSending || !sendAmount || parseFloat(sendAmount) <= 0}
-                className="w-full mt-2"
-              >
-                {isSending ? 'Sending...' : 'Send ETH'}
-              </Button>
-              {txHash && (
-                <div className="mt-2 p-2 border rounded bg-green-100 text-green-800 text-xs break-all">
-                  <p className="font-bold">Transaction Sent:</p>
-                  <a href={`https://holesky.etherscan.io/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-900">
-                    {txHash}
-                  </a>
+                {balance === null && ethAddress && (
+                  <p className="mt-1 text-xs">Loading balance...</p>
+                )}
+                <div className="mt-4 flex justify-center">
+                  <Cuer arena="/doghat.png" value={ethAddress} />
                 </div>
-              )}
-              {sendError && (
-                <div className="mt-2 p-2 border rounded bg-red-100 text-red-800 text-xs">
-                  <p className="font-bold">Send Error:</p>
-                  <p>{sendError}</p>
+                <div className="mt-6 border-t pt-4 space-y-3">
+                  <h3 className="text-lg font-semibold mb-2">Send ETH</h3>
+                  <div>
+                    <Label htmlFor="destinationAddress" className="block text-sm font-medium mb-1">To Address</Label>
+                    <Input
+                      id="destinationAddress"
+                      type="text"
+                      placeholder="0x..."
+                      value={destinationAddress}
+                      onChange={(e) => setDestinationAddress(e.target.value)}
+                      className={`w-full ${isValidAddress === false ? 'border-red-500' : ''} ${isValidAddress === true ? 'border-green-500' : ''}`}
+                      disabled={isSending}
+                    />
+                    {isValidAddress === false && destinationAddress !== '' && (
+                      <p className="text-xs text-red-600 mt-1">Invalid Ethereum address</p>
+                    )}
+                  </div>
+                  <div>
+                    <Label htmlFor="sendAmount" className="block text-sm font-medium mb-1">Amount (ETH)</Label>
+                    <Input
+                      id="sendAmount"
+                      type="number"
+                      step="0.0001"
+                      min="0"
+                      placeholder="0.001"
+                      value={sendAmount}
+                      onChange={(e) => setSendAmount(e.target.value)}
+                      className="w-full"
+                      disabled={isSending}
+                    />
+                  </div>
+                  <Button
+                    onClick={handleSend}
+                    disabled={!isValidAddress || !destinationAddress || isSending || !sendAmount || parseFloat(sendAmount) <= 0}
+                    className="w-full mt-2"
+                  >
+                    {isSending ? 'Sending...' : 'Send ETH'}
+                  </Button>
+                  {txHash && (
+                    <div className="mt-2 p-2 border rounded bg-green-100 text-green-800 text-xs break-all">
+                      <p className="font-bold">Transaction Sent:</p>
+                      <a href={`https://holesky.etherscan.io/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-900">
+                        {txHash}
+                      </a>
+                    </div>
+                  )}
+                  {sendError && (
+                    <div className="mt-2 p-2 border rounded bg-red-100 text-red-800 text-xs">
+                      <p className="font-bold">Send Error:</p>
+                      <p>{sendError}</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+            <Button
+              onClick={logout}
+              variant="outline"
+              className="w-full mt-4"
+            >
+              Logout
+            </Button>
           </div>
         )}
-        {hasExistingCredential === false && (
-          <p className="text-sm text-gray-500 mt-2 w-full max-w-md text-center">No platform authenticator detected. You may need to use a different device/browser or security key.</p>
-        )}
-        {loginError && (
+
+        {/* Login Error Display */} 
+        {loginError && !isLoading && (
           <div className="mt-2 p-4 border rounded bg-red-100 text-red-800 text-sm w-full max-w-md">
-            <p className="font-bold">Login Error:</p>
+            <p className="font-bold">Error:</p>
             <p>{loginError}</p>
           </div>
         )}
-      </main>       
+
+      </main>
     </div>
   );
 }
