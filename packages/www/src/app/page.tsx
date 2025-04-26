@@ -3,9 +3,11 @@
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { useWebAuthnEth } from '@/hooks/useWebAuthnEth';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, http, isAddress } from 'viem';
 import { holesky } from 'viem/chains';
 import { Cuer } from 'cuer'
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 
 export default function Home() {
   const {
@@ -19,6 +21,8 @@ export default function Home() {
   } = useWebAuthnEth();
 
   const [balance, setBalance] = useState<string | null>(null);
+  const [destinationAddress, setDestinationAddress] = useState<string>('');
+  const [isValidAddress, setIsValidAddress] = useState<boolean | null>(null);
 
   useEffect(() => {
     async function fetchBalance() {
@@ -44,6 +48,20 @@ export default function Home() {
     
     fetchBalance();
   }, [ethAddress]);
+
+  useEffect(() => {
+    if (destinationAddress === '') {
+      setIsValidAddress(null);
+    } else {
+      setIsValidAddress(isAddress(destinationAddress));
+    }
+  }, [destinationAddress]);
+
+  const handleSend = async () => {
+    if (!isValidAddress || !ethAddress) return;
+    console.log(`Initiating send from ${ethAddress} to ${destinationAddress}`);
+    alert(`Send initiated to ${destinationAddress}. Check console for details.`);
+  };
 
   return (
     <div className="flex flex-col items-center justify-center w-full min-h-screen p-4 md:p-8">
@@ -84,6 +102,27 @@ export default function Home() {
             )}
             <div className="mt-4 flex justify-center">
               <Cuer arena="/doghat.png" value={ethAddress} />
+            </div>
+            <div className="mt-6 border-t pt-4">
+              <Label htmlFor="destinationAddress" className="block text-sm font-medium mb-1">Send ETH</Label>
+              <Input
+                id="destinationAddress"
+                type="text"
+                placeholder="0x..."
+                value={destinationAddress}
+                onChange={(e) => setDestinationAddress(e.target.value)}
+                className={`w-full ${isValidAddress === false ? 'border-red-500' : ''} ${isValidAddress === true ? 'border-green-500' : ''}`}
+              />
+              {isValidAddress === false && destinationAddress !== '' && (
+                <p className="text-xs text-red-600 mt-1">Invalid Ethereum address</p>
+              )}
+              <Button
+                onClick={handleSend}
+                disabled={!isValidAddress || !destinationAddress}
+                className="w-full mt-2"
+              >
+                Send ETH
+              </Button>
             </div>
           </div>
         )}
