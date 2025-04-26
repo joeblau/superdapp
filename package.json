@@ -1,5 +1,5 @@
 {
-  "name": "blau",
+  "name": "superdapp",
   "module": "index.ts",
   "type": "module",
   "private": true,
