@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 // import { useWebAuthnEth } from '@/hooks/use-web-authn-eth'; // Remove old hook import
 import { useAuth } from '@/contexts/AuthContext'; // Import useAuth
 import { useRouter } from 'next/navigation';
+import { Navbar } from '@/components/navigation/navbar'; // Import Navbar
 
 export default function LoggedInLayout({ children }: { children: React.ReactNode }) {
   // Use context hook
@@ -30,5 +31,12 @@ export default function LoggedInLayout({ children }: { children: React.ReactNode
   }
 
   // User is logged in, render the protected page content
-  return <>{children}</>;
+  return (
+    <>
+      <Navbar />
+      <main className="pt-14"> {/* Add padding-top to account for fixed navbar height */}
+        {children}
+      </main>
+    </>
+  );
 } 

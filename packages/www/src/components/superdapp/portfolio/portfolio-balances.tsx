@@ -13,7 +13,7 @@ type ChainBalance = {
   formattedBalance: string;
 };
 
-export function Balances() {
+export function PortfolioBalances() {
   const { ethAddress } = useAuth();
   const [balances, setBalances] = useState<ChainBalance[]>([]);
   const [isLoading, setIsLoading] = useState(true);
