@@ -1,6 +1,8 @@
 {
-  "name": "web3",
-  "module": "src/index.ts",
+  "name": "@common/web3",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
   "devDependencies": {
     "@types/bun": "latest"
   },
