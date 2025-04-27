@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { WebAuthnP256 } from 'ox';
-import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { bytesToHex, hexToBytes } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { bytesToHex, stringToBytes } from 'viem';
 
 // --- Helper Functions ---
 
@@ -14,31 +14,55 @@ function generateChallenge(): ArrayBuffer {
   return challenge.buffer;
 }
 
-async function generateSymmetricKey(): Promise<CryptoKey> {
-  return window.crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true, // extractable
-    ["encrypt", "decrypt"]
-  );
-}
+/**
+ * Derives a deterministic 32-byte private key from a WebAuthn credential ID using HKDF.
+ * WARNING: This method uses the credentialId (potentially public) and a fixed salt.
+ * It is NOT cryptographically secure for high-value keys. For demonstration purposes only.
+ *
+ * @param credentialIdB64 The base64url encoded credential ID from WebAuthn.
+ * @returns A promise that resolves to the derived private key as a hex string.
+ */
+async function deriveEthKeyFromCredentialId(credentialIdB64: string): Promise<`0x${string}`> {
+  // Fixed salt for HKDF. In a real app, this might be application-specific.
+  const salt = stringToBytes("webauthn-eth-derive-salt-v1"); // Use a specific salt
+  // Context information for HKDF.
+  const info = stringToBytes("webauthn-eth-hkdf-info");
 
-async function encryptData(key: CryptoKey, data: Uint8Array): Promise<{ iv: Uint8Array, encryptedData: ArrayBuffer }> {
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
-  const encryptedData = await window.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: iv },
-    key,
-    data
-  );
-  return { iv, encryptedData };
-}
+  // The credential ID is typically base64url encoded, needs conversion to ArrayBuffer
+  // 1. Replace base64url specific chars
+  const base64 = credentialIdB64.replace(/-/g, '+').replace(/_/g, '/');
+  // 2. Decode base64 string to binary string
+  const binaryString = window.atob(base64);
+  // 3. Convert binary string to Uint8Array
+  const len = binaryString.length;
+  const credentialIdBytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    credentialIdBytes[i] = binaryString.charCodeAt(i);
+  }
+  const credentialIdBuffer = credentialIdBytes.buffer;
 
-async function decryptData(key: CryptoKey, iv: Uint8Array, encryptedData: ArrayBuffer): Promise<Uint8Array> {
-  const decrypted = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: iv },
-    key,
-    encryptedData
+  // Import the credential ID as the input key material (IKM) for HKDF
+  const ikm = await window.crypto.subtle.importKey(
+    'raw',
+    credentialIdBuffer,
+    { name: 'HKDF' },
+    false, // not extractable
+    ['deriveBits']
   );
-  return new Uint8Array(decrypted);
+
+  // Derive the private key bits using HKDF
+  const derivedBytes = await window.crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      salt: salt,
+      info: info,
+      hash: 'SHA-256' // Use SHA-256 for HKDF
+    },
+    ikm,
+    256 // Derive 256 bits (32 bytes) for the private key
+  );
+
+  return bytesToHex(new Uint8Array(derivedBytes));
 }
 
 // --- Custom Hook ---
@@ -50,7 +74,7 @@ export function useWebAuthnEth() {
   const [loggedInCredentialInfo, setLoggedInCredentialInfo] = useState<any>(null);
   const [ethAddress, setEthAddress] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false); // Add loading state
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
   // Check for WebAuthn availability on mount
   useEffect(() => {
@@ -76,117 +100,118 @@ export function useWebAuthnEth() {
     checkCredentials();
   }, []);
 
-  // Wrap core logic functions in useCallback for stability
-  const createAccountAndEthKey = useCallback(async () => {
-    setLoginError(null);
-    setIsLoading(true);
-    try {
-      console.log("Attempting to create WebAuthn credential...");
-      const webAuthn = await WebAuthnP256.createCredential({ name: 'Superdapp' });
-      console.log("WebAuthn Credential created:", webAuthn);
-      const webAuthnCredId = webAuthn.id;
-
-      const secp256k1PrivateKeyBytes = hexToBytes(generatePrivateKey());
-      const ethAccount = privateKeyToAccount(bytesToHex(secp256k1PrivateKeyBytes));
-      console.log("Generated Ethereum Address:", ethAccount.address);
-
-      const symmetricKey = await generateSymmetricKey();
-      const exportedSymKey = await window.crypto.subtle.exportKey("jwk", symmetricKey);
-
-      const { iv, encryptedData } = await encryptData(symmetricKey, secp256k1PrivateKeyBytes);
-
-      localStorage.setItem(`webauthn_cred_${webAuthnCredId}_encrypted_pk`, bytesToHex(new Uint8Array(encryptedData)));
-      localStorage.setItem(`webauthn_cred_${webAuthnCredId}_iv`, bytesToHex(iv));
-      localStorage.setItem(`webauthn_cred_${webAuthnCredId}_sym_key`, JSON.stringify(exportedSymKey));
-
-      setLoggedInCredentialInfo({ id: webAuthnCredId, type: 'public-key' });
-      setAccount(`WebAuthn Account Created (${webAuthnCredId.substring(0, 10)}...)`);
-      setEthAddress(ethAccount.address);
-
-    } catch (error) {
-      console.error('Failed to create account/key:', error);
-      const errorMsg = error instanceof Error ? error.message : "An unknown creation error occurred.";
-      setLoginError(errorMsg); // Use loginError state for creation errors too
-    } finally {
-        setIsLoading(false);
-    }
-  }, []); // No dependencies needed if functions used inside are stable
-
+  // Define login first as create might call it
   const loginAndAccessEthKey = useCallback(async () => {
     setLoginError(null);
     setLoggedInCredentialInfo(null);
     setEthAddress(null);
     setIsLoading(true);
+    console.log(`[Login] Current hostname (inferred rpId): ${window.location.hostname}`);
     try {
       console.log("Attempting WebAuthn login...");
       const challenge = generateChallenge();
+      // Request assertion without specific credential IDs to allow any registered passkey for this RP
       const credentialAssertion = await navigator.credentials.get({
-         publicKey: { challenge: challenge, allowCredentials: [], userVerification: 'preferred' }
+         publicKey: { challenge: challenge, userVerification: 'preferred' /* rpId can be omitted if matching current domain */ }
       }) as PublicKeyCredential;
       console.log("WebAuthn Assertion received:", credentialAssertion);
 
-      const webAuthnCredId = credentialAssertion.id;
+      const webAuthnCredId = credentialAssertion.id; // This is base64url encoded
+      console.log(`[Login] Obtained credentialId: ${webAuthnCredId}`);
 
-      const storedSymKeyJWK = localStorage.getItem(`webauthn_cred_${webAuthnCredId}_sym_key`);
-      const storedEncryptedPKHex = localStorage.getItem(`webauthn_cred_${webAuthnCredId}_encrypted_pk`);
-      const storedIVHex = localStorage.getItem(`webauthn_cred_${webAuthnCredId}_iv`);
+      console.log("Deriving Ethereum key from credential ID:", webAuthnCredId);
+      const privateKeyHex = await deriveEthKeyFromCredentialId(webAuthnCredId);
+      console.log(`[Login] Derived private key hex: ${privateKeyHex}`);
+      const ethAccount = privateKeyToAccount(privateKeyHex);
+      const ethAccountAddress = ethAccount.address;
+      console.log(`[Login] Derived ETH address: ${ethAccountAddress}`);
+      console.log("Derived Ethereum Address:", ethAccountAddress);
+      console.warn("SECURITY WARNING: ETH key derived directly from credentialId. Suitable for demo only.");
 
-      let ethAccountAddress: `0x${string}`;
-      let accountStatusMsg: string;
+      const accountStatusMsg = `Logged In (${webAuthnCredId.substring(0, 10)}...)`;
 
-      if (storedSymKeyJWK && storedEncryptedPKHex && storedIVHex) {
-        console.log("Existing encrypted key data found. Decrypting...");
-        const symmetricKey = await window.crypto.subtle.importKey(
-          "jwk", JSON.parse(storedSymKeyJWK), { name: "AES-GCM" }, true, ["decrypt"]
-        );
-        const decryptedPrivateKeyBytes = await decryptData(
-          symmetricKey,
-          hexToBytes(storedIVHex as `0x${string}`),
-          hexToBytes(storedEncryptedPKHex as `0x${string}`).buffer as ArrayBuffer
-        );
-        const ethAccount = privateKeyToAccount(bytesToHex(decryptedPrivateKeyBytes));
-        ethAccountAddress = ethAccount.address;
-        accountStatusMsg = `Logged In & Accessed Existing Key (${webAuthnCredId.substring(0, 10)}...)`;
-        console.log("Decrypted PK successfully. Address:", ethAccountAddress);
-
-      } else {
-        console.log("No encrypted key data found for this passkey. Generating and storing new key...");
-        const newPrivateKeyBytes = hexToBytes(generatePrivateKey());
-        const newEthAccount = privateKeyToAccount(bytesToHex(newPrivateKeyBytes));
-        ethAccountAddress = newEthAccount.address;
-        accountStatusMsg = `Logged In & Generated New Key (${webAuthnCredId.substring(0, 10)}...)`;
-        console.log("Generated new Ethereum Address:", ethAccountAddress);
-
-        const newSymmetricKey = await generateSymmetricKey();
-        const newExportedSymKey = await window.crypto.subtle.exportKey("jwk", newSymmetricKey);
-
-        const { iv: newIv, encryptedData: newEncryptedData } = await encryptData(newSymmetricKey, newPrivateKeyBytes);
-
-        localStorage.setItem(`webauthn_cred_${webAuthnCredId}_encrypted_pk`, bytesToHex(new Uint8Array(newEncryptedData)));
-        localStorage.setItem(`webauthn_cred_${webAuthnCredId}_iv`, bytesToHex(newIv));
-        localStorage.setItem(`webauthn_cred_${webAuthnCredId}_sym_key`, JSON.stringify(newExportedSymKey));
-        console.log("Stored encrypted data for new key.");
-      }
+      // NO local storage check needed anymore
 
       setLoggedInCredentialInfo({ id: webAuthnCredId, type: credentialAssertion.type });
       setAccount(accountStatusMsg);
       setEthAddress(ethAccountAddress);
 
     } catch (error) {
-      console.error('Failed during login/key access/generation:', error);
+      console.error('Failed during login/key access:', error);
       const errorMsg = error instanceof Error ? error.message : "An unknown login error occurred.";
-      setLoginError(errorMsg);
+      // Distinguish cancellation from other errors if possible
+      if (error instanceof Error && (error.name === 'NotAllowedError' || error.message.includes('aborted') || error.message.includes('The operation was aborted'))) {
+          console.log("WebAuthn login operation cancelled by user or timed out.");
+          // Optionally set a specific state or message for cancellation
+          setLoginError("Login cancelled or timed out."); 
+      } else {
+          setLoginError(errorMsg);
+      }
     } finally {
         setIsLoading(false);
     }
-  }, []); // No dependencies needed
+  }, []); // No dependencies needed here
+  const createAccountAndEthKey = useCallback(async () => {
+    setLoginError(null);
+    setIsLoading(true);
+    console.log(`[Create] Current hostname (inferred rpId): ${window.location.hostname}`);
+    
+    try {
+      // First try to login with existing credentials
+      console.log("Attempting to login with existing credentials first...");
+      await loginAndAccessEthKey();
+      console.log("Successfully logged in with existing credential");
+      
+    } catch (loginError) {
+      console.log("No existing credential found or login failed, creating new credential...");
+      
+      try {
+        console.log("Attempting to create WebAuthn credential...");
+        // Use a consistent name for the relying party
+        const webAuthn = await WebAuthnP256.createCredential({ name: 'Superdapp' });
+        console.log("WebAuthn Credential created:", webAuthn);
+        const webAuthnCredId = webAuthn.id; // This is base64url encoded
+        console.log(`[Create] Obtained credentialId: ${webAuthnCredId}`);
+
+        console.log("Deriving Ethereum key from credential ID:", webAuthnCredId);
+        const privateKeyHex = await deriveEthKeyFromCredentialId(webAuthnCredId);
+        console.log(`[Create] Derived private key hex: ${privateKeyHex}`);
+        const ethAccount = privateKeyToAccount(privateKeyHex);
+        console.log(`[Create] Derived ETH address: ${ethAccount.address}`);
+        console.log("Derived Ethereum Address:", ethAccount.address);
+        console.warn("SECURITY WARNING: ETH key derived directly from credentialId. Suitable for demo only.");
+
+        // NO local storage needed anymore
+
+        setLoggedInCredentialInfo({ id: webAuthnCredId, type: 'public-key' });
+        setAccount(`WebAuthn Account Created (${webAuthnCredId.substring(0, 10)}...)`);
+        setEthAddress(ethAccount.address);
+        
+      } catch (createError) {
+        console.error('Failed to create account/key:', createError);
+        
+        if (createError instanceof Error && createError.name === 'NotAllowedError') {
+          // Handle cancellation or refusal by the user/browser separately
+          console.log("Credential creation cancelled or not allowed (NotAllowedError).");
+          setLoginError("Passkey creation was cancelled or is not allowed.");
+        } else {
+          // Handle other types of errors
+          const errorMsg = createError instanceof Error ? createError.message : "An unknown creation error occurred.";
+          setLoginError(errorMsg);
+        }
+        
+        // We don't need to handle ConstraintError separately anymore since we try login first
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [loginAndAccessEthKey]); // loginAndAccessEthKey dependency is correct here
 
   const logout = useCallback(() => {
     setAccount(null);
     setLoggedInCredentialInfo(null);
     setEthAddress(null);
     setLoginError(null);
-    // Keep isLoading false, no async operation here
     console.log("User logged out.");
   }, []);
 
@@ -197,7 +222,7 @@ export function useWebAuthnEth() {
     loggedInCredentialInfo,
     ethAddress,
     loginError,
-    isLoading, // Return loading state
+    isLoading,
     createAccountAndEthKey,
     loginAndAccessEthKey,
     logout,
