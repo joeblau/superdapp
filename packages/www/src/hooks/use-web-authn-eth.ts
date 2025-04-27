@@ -3,7 +3,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { WebAuthnP256 } from 'ox';
 import { privateKeyToAccount } from 'viem/accounts';
-import { bytesToHex, stringToBytes } from 'viem';
+import { bytesToHex, stringToBytes, hexToBytes } from 'viem';
+
+// Local storage key for storing the credential ID
+const WEBAUTHN_CREDENTIAL_ID_KEY = "webauthnCredentialId";
 
 // --- Helper Functions ---
 
@@ -74,34 +77,117 @@ export function useWebAuthnEth() {
   const [loggedInCredentialInfo, setLoggedInCredentialInfo] = useState<any>(null);
   const [ethAddress, setEthAddress] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  // Start isLoading as true to cover initial checks and auto-login attempt
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  // State to track if the initial auto-login attempt is done
+  const [initialAuthCheckComplete, setInitialAuthCheckComplete] = useState<boolean>(false);
 
-  // Check for WebAuthn availability on mount
+  // Combined effect for checking authenticator and attempting auto-login
   useEffect(() => {
-    const checkCredentials = async () => {
-      if (window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
-        try {
-          const available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
-          setHasExistingCredential(available);
-          if (available) {
-            console.log("Platform authenticator available.");
-          } else {
-            console.log("Platform authenticator *not* available.");
-          }
-        } catch (error) {
-          console.error("Error checking authenticator availability:", error);
-          setHasExistingCredential(false);
+    let isMounted = true; // Prevent state updates if component unmounts
+
+    const performInitialChecks = async () => {
+        let platformAuthAvailable = false;
+        // 1. Check for platform authenticator availability
+        if (window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
+            try {
+                platformAuthAvailable = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+                if (isMounted) setHasExistingCredential(platformAuthAvailable);
+                console.log(`Platform authenticator available: ${platformAuthAvailable}`);
+            } catch (error) {
+                console.error("Error checking authenticator availability:", error);
+                if (isMounted) setHasExistingCredential(false);
+            }
+        } else {
+            console.log("WebAuthn or isUserVerifyingPlatformAuthenticatorAvailable not supported.");
+            if (isMounted) setHasExistingCredential(false);
         }
-      } else {
-        console.log("WebAuthn or isUserVerifyingPlatformAuthenticatorAvailable not supported.");
-        setHasExistingCredential(false);
-      }
+
+        // 2. Attempt auto-login if platform authenticator is available
+        const storedCredIdB64 = localStorage.getItem(WEBAUTHN_CREDENTIAL_ID_KEY);
+        if (platformAuthAvailable && storedCredIdB64) {
+            console.log("Attempting auto-login with stored credential ID:", storedCredIdB64);
+            try {
+                const challenge = generateChallenge();
+                // Convert base64url ID back to ArrayBuffer
+                const base64 = storedCredIdB64.replace(/-/g, '+').replace(/_/g, '/');
+                const binaryString = window.atob(base64);
+                const len = binaryString.length;
+                const credentialIdBytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    credentialIdBytes[i] = binaryString.charCodeAt(i);
+                }
+
+                const credentialAssertion = await navigator.credentials.get({
+                    publicKey: {
+                        challenge: challenge,
+                        userVerification: 'preferred',
+                        allowCredentials: [{
+                            type: 'public-key',
+                            id: credentialIdBytes.buffer,
+                        }],
+                        // rpId: window.location.hostname // Include if needed, usually inferred
+                    }
+                }) as PublicKeyCredential;
+
+                console.log("Auto-login assertion successful:", credentialAssertion);
+                const webAuthnCredId = credentialAssertion.id; // This is base64url encoded
+
+                console.log("Deriving ETH key for auto-login...");
+                const privateKeyHex = await deriveEthKeyFromCredentialId(webAuthnCredId);
+                const ethAccount = privateKeyToAccount(privateKeyHex);
+                const ethAccountAddress = ethAccount.address;
+                console.log(`Auto-login successful. ETH Address: ${ethAccountAddress}`);
+
+                if (isMounted) {
+                    setLoggedInCredentialInfo({ id: webAuthnCredId, type: credentialAssertion.type });
+                    setAccount(`Logged In (${webAuthnCredId.substring(0, 10)}...)`);
+                    setEthAddress(ethAccountAddress);
+                    setLoginError(null); // Clear any previous errors
+                }
+
+            } catch (error) {
+                console.error("Auto-login failed:", error);
+                 if (error instanceof Error && (error.name === 'NotAllowedError' || error.message.includes('aborted'))) {
+                    console.log("Auto-login cancelled or timed out.");
+                    // Don't clear the stored ID if user cancelled, they might try again
+                 } else {
+                    // For other errors (e.g., credential invalid/not found), clear the stored ID
+                    localStorage.removeItem(WEBAUTHN_CREDENTIAL_ID_KEY);
+                    console.log("Removed invalid credential ID from storage.");
+                 }
+                 // Ensure state reflects failed auto-login if component still mounted
+                 if (isMounted) {
+                    setLoggedInCredentialInfo(null);
+                    setAccount(null);
+                    setEthAddress(null);
+                 }
+            }
+        } else {
+             console.log("Skipping auto-login: No platform authenticator or no stored credential ID.");
+        }
+
+        // Mark initial checks as complete and set loading to false
+        if (isMounted) {
+            setInitialAuthCheckComplete(true);
+            setIsLoading(false);
+        }
     };
-    checkCredentials();
-  }, []);
+
+    performInitialChecks();
+
+    return () => {
+        isMounted = false; // Cleanup function to set isMounted to false
+    };
+  }, []); // Run only once on mount
 
   // Define login first as create might call it
   const loginAndAccessEthKey = useCallback(async () => {
+    // Don't run if initial checks are still loading
+    if (isLoading && !initialAuthCheckComplete) {
+        console.log("Login blocked: Initial auth check in progress.");
+        return;
+    }
     setLoginError(null);
     setLoggedInCredentialInfo(null);
     setEthAddress(null);
@@ -119,6 +205,10 @@ export function useWebAuthnEth() {
       const webAuthnCredId = credentialAssertion.id; // This is base64url encoded
       console.log(`[Login] Obtained credentialId: ${webAuthnCredId}`);
 
+      // Store credential ID in local storage on successful login
+      localStorage.setItem(WEBAUTHN_CREDENTIAL_ID_KEY, webAuthnCredId);
+      console.log(`[Login] Stored credentialId in localStorage: ${webAuthnCredId}`);
+
       console.log("Deriving Ethereum key from credential ID:", webAuthnCredId);
       const privateKeyHex = await deriveEthKeyFromCredentialId(webAuthnCredId);
       console.log(`[Login] Derived private key hex: ${privateKeyHex}`);
@@ -130,7 +220,7 @@ export function useWebAuthnEth() {
 
       const accountStatusMsg = `Logged In (${webAuthnCredId.substring(0, 10)}...)`;
 
-      // NO local storage check needed anymore
+      // NO local storage check needed anymore (handled by auto-login)
 
       setLoggedInCredentialInfo({ id: webAuthnCredId, type: credentialAssertion.type });
       setAccount(accountStatusMsg);
@@ -150,28 +240,32 @@ export function useWebAuthnEth() {
     } finally {
         setIsLoading(false);
     }
-  }, []); // No dependencies needed here
+  }, [isLoading, initialAuthCheckComplete]); // Add dependencies
+
   const createAccountAndEthKey = useCallback(async () => {
+    // Don't run if initial checks are still loading
+    if (isLoading && !initialAuthCheckComplete) {
+        console.log("Create account blocked: Initial auth check in progress.");
+        return;
+    }
     setLoginError(null);
     setIsLoading(true);
     console.log(`[Create] Current hostname (inferred rpId): ${window.location.hostname}`);
-    
+
+    // Remove login attempt from within create - simplify flow
+    // User should explicitly click "Login" or "Create"
+
     try {
-      // First try to login with existing credentials
-      console.log("Attempting to login with existing credentials first...");
-      await loginAndAccessEthKey();
-      console.log("Successfully logged in with existing credential");
-      
-    } catch (loginError) {
-      console.log("No existing credential found or login failed, creating new credential...");
-      
-      try {
         console.log("Attempting to create WebAuthn credential...");
-        // Use a consistent name for the relying party
         const webAuthn = await WebAuthnP256.createCredential({ name: 'Superdapp' });
         console.log("WebAuthn Credential created:", webAuthn);
         const webAuthnCredId = webAuthn.id; // This is base64url encoded
         console.log(`[Create] Obtained credentialId: ${webAuthnCredId}`);
+
+        // Store credential ID in local storage on successful creation
+        localStorage.setItem(WEBAUTHN_CREDENTIAL_ID_KEY, webAuthnCredId);
+        console.log(`[Create] Stored credentialId in localStorage: ${webAuthnCredId}`);
+
 
         console.log("Deriving Ethereum key from credential ID:", webAuthnCredId);
         const privateKeyHex = await deriveEthKeyFromCredentialId(webAuthnCredId);
@@ -181,37 +275,39 @@ export function useWebAuthnEth() {
         console.log("Derived Ethereum Address:", ethAccount.address);
         console.warn("SECURITY WARNING: ETH key derived directly from credentialId. Suitable for demo only.");
 
-        // NO local storage needed anymore
+        // NO local storage needed anymore (handled by auto-login)
 
         setLoggedInCredentialInfo({ id: webAuthnCredId, type: 'public-key' });
         setAccount(`WebAuthn Account Created (${webAuthnCredId.substring(0, 10)}...)`);
         setEthAddress(ethAccount.address);
-        
-      } catch (createError) {
-        console.error('Failed to create account/key:', createError);
-        
-        if (createError instanceof Error && createError.name === 'NotAllowedError') {
-          // Handle cancellation or refusal by the user/browser separately
-          console.log("Credential creation cancelled or not allowed (NotAllowedError).");
-          setLoginError("Passkey creation was cancelled or is not allowed.");
-        } else {
-          // Handle other types of errors
-          const errorMsg = createError instanceof Error ? createError.message : "An unknown creation error occurred.";
-          setLoginError(errorMsg);
-        }
-        
-        // We don't need to handle ConstraintError separately anymore since we try login first
+
+    } catch (createError) {
+      console.error('Failed to create account/key:', createError);
+      // Keep existing error handling
+      if (createError instanceof Error && createError.name === 'NotAllowedError') {
+        console.log("Credential creation cancelled or not allowed (NotAllowedError).");
+        setLoginError("Passkey creation was cancelled or is not allowed.");
+      } else {
+        const errorMsg = createError instanceof Error ? createError.message : "An unknown creation error occurred.";
+        setLoginError(errorMsg);
       }
     } finally {
       setIsLoading(false);
     }
-  }, [loginAndAccessEthKey]); // loginAndAccessEthKey dependency is correct here
+  // Remove loginAndAccessEthKey dependency, add isLoading and initialAuthCheckComplete
+  }, [isLoading, initialAuthCheckComplete]);
 
   const logout = useCallback(() => {
+    // Clear credential ID from local storage on logout
+    localStorage.removeItem(WEBAUTHN_CREDENTIAL_ID_KEY);
+    console.log("Cleared credential ID from localStorage.");
+
     setAccount(null);
     setLoggedInCredentialInfo(null);
     setEthAddress(null);
     setLoginError(null);
+    // Optionally set isLoading back to false if it was true
+    setIsLoading(false);
     console.log("User logged out.");
   }, []);
 

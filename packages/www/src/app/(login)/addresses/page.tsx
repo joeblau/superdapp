@@ -1,4 +1,5 @@
+import Addresses from "@/components/superdapp/addresses"
 
-export default function Addresses() {
-    return <div>Addresses</div>
+export default function AddressesPage() {
+    return <Addresses />
 }
